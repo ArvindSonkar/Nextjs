@@ -1,0 +1,258 @@
+SHOWTIME / ENGINEERING WORKBOOK / 01
+Requirements before code.
+The product contract for our movie booking project. Every rule below becomes an implementation task and a test.
+
+P01 design package prepared
+10 October 2026 · Arvind · Based on Final Project Plan v1.0
+Design document only. Wireframes are illustrative; application functionality has not been implemented.
+
+Scope
+Stories
+Rules
+Routes
+Wireframes
+States
+Architecture
+Next tasks
+01 / Product and permissions
+ShowTime is an independently branded movie-booking portfolio app. A visitor browses Bengaluru shows, signs in through Google, reserves seats, completes a test payment, receives a ticket, and can cancel under the defined policy. An administrator maintains demo cinema inventory and investigates bookings.
+
+We retain Next.js App Router, React, TypeScript, PostgreSQL, Prisma, Better Auth, Razorpay, Vercel and the tools in the final plan. Provider account selection and compatible version pinning happen in P02.
+
+Operation	Visitor	Customer	Admin
+Browse movies/shows	Yes	Yes	Yes
+Create seat hold/pay	No	Own booking	Own booking
+Read/cancel customer booking	No	Own, subject to policy	Read any; admin cancellation via show workflow
+View ticket	No	Own valid ticket	Authorized lookup
+Change catalogue or schedule	No	No	Yes
+Cancel show	No	No	Yes
+Assign own admin role	No	No	No: controlled provisioning
+Read operational audit/jobs	No	No	Yes
+Authentication answers “Who are you?” Authorization answers “May you perform this operation on this record?” A signed-in customer still cannot read another customer's booking.
+
+Deferred: real ticket sales, events, food, coupons, reviews, SMS/password login, theatre-owner roles, gate scanning, realtime sockets, Redis, microservices and AWS/Kubernetes migration.
+
+02 / User stories and acceptance checks
+A story names a user goal. An acceptance check is an observable condition that tells us the feature works. These IDs will map to repository tasks.
+
+ID	Actor	Goal	Phase	Acceptance check
+C01	Visitor	Discover movies	P05	Given published shows in Bengaluru, city/date filters return matching movies; empty results explain how to clear filters.
+C02	Visitor	Inspect a movie and shows	P05	Movie details show language/duration; only published, future, non-cancelled shows are offered.
+C03	Customer	Sign in before reserving	P04	Google login returns to an allowed internal destination; a visitor cannot create a hold.
+C04	Customer	Select seats	P06	Select 1–6 seats from one show, see category prices and total; unavailable seats cannot be selected.
+C05	Customer	Reserve all seats together	P06	Two concurrent users requesting A1 yield one hold; a request containing any unavailable seat acquires none.
+C06	Customer	Understand expiry	P06	Refresh restores the same server expiry; at expiry checkout is blocked and seats become reclaimable without waiting for cleanup.
+C07	Customer	Pay the correct total	P07	Server uses stored prices in paise; changing an amount in a request cannot lower the order total.
+C08	Customer	Recover payment outcome	P08	Closing the browser after payment still allows webhook/reconciliation to reach the correct booking/refund outcome.
+C09	Customer	See my ticket	P09	Only an owned confirmed booking produces a valid ticket; pending/expired/cancelled bookings never appear as active tickets.
+C10	Customer	Receive confirmation email	P09	A confirmed booking schedules email; email failure is retried and does not cancel the booking.
+C11	Customer	Cancel eligible booking	P09	A confirmed booking cancelled at least 2 hours before showtime releases its allocation and queues a full demo refund once.
+C12	Customer	Follow refund status	P09	Cancellation and refund are shown separately; repeated cancellation does not create another refund.
+A01	Admin	Manage movie catalogue	P05	Validated movie and poster updates appear in browsing after revalidation; non-admin writes fail.
+A02	Admin	Manage screens and seats	P05	Seat row/number is unique within a screen; layouts with booking history are protected from destructive changes.
+A03	Admin	Publish shows	P05	Concurrent overlapping schedules cannot both succeed; price, movie, screen, start and end are required.
+A04	Admin	Inspect bookings	P09	Admin can search bookings and linked payment/refund states; secrets and full provider payloads are not exposed.
+A05	Admin	Cancel a show	P09	Cancellation blocks new holds and confirmations, invalidates active tickets, and queues eligible captured amounts for refund.
+A06	Admin	Inspect audit and failed work	P08/P09	Important admin changes are attributed to an actor/time; exhausted job retries remain visible for investigation.
+S01	System	Handle repeats and event order	P08	Duplicate callbacks/webhooks/jobs produce one logical outcome; an older authorized event cannot regress captured payment state.
+S02	System	Operate and recover	P11	A restore exercise and compatible code rollback are recorded; alerts identify payment/job failures by correlation IDs.
+03 / Booking policy contract
+These are our chosen demo-product policies, not claims about BookMyShow policies. Boundary cases are explicit so frontend and backend cannot interpret them differently.
+
+ID	Policy	Decision	Implementation/test implication
+R01	Initial city	Bengaluru; model supports additional cities.	Show seed data and catalogue agree.
+R02	Seat count	Minimum 1 and maximum 6 seats per booking, all from one show.	Reject 0, 7, duplicate IDs and mixed-show IDs.
+R03	Seat hold	5 minutes, capped at show start. Server determines expiry.	holdExpiresAt = min(serverNow + 5 minutes, showStart).
+R04	Booking cutoff	No holds or confirmations at or after show start.	Validate in the mutation transaction, not only the screen.
+R05	Customer cancellation	Full booking only; eligible when serverNow <= showStart - 2 hours.	At exactly 2 hours cancellation is allowed; afterward rejected.
+R06	Refund amount	Full captured demo amount for eligible cancellations; no partial cancellation in V1.	Booking cancellation and refund completion remain distinct.
+R07	Late captured payment	An expired booking is not revived. Captured funds enter refund processing.	Do not take a seat from a newer valid holder.
+R08	Turnaround	20 minutes after show end before next show on that screen.	A show ending 20:00 permits the next at 20:20.
+R09	Pricing	Seat prices only, all totals shown before pay; integer paise.	Two seats at Rs 250 = 50000 paise. No coupon/tax engine.
+R10	Price snapshot	Use held/booked price snapshot for that attempt.	Later admin price changes cannot rewrite history.
+R11	Payment retry	Same pending booking may retry while hold remains valid; retry does not extend the hold.	More than one captured attempt cannot create extra tickets; excess captured money requires refund.
+R12	Failed attempt	A failed payment attempt does not by itself expire the booking.	Allow retry before hold expiry, subject to verified provider state.
+R13	Show cancellation	Immediately stop new sales and confirmation; cancel affected bookings and refund captured funds.	An in-flight captured payment follows the same refund path.
+R14	Time display	Store instants consistently; render in cinema timezone, initially Asia/Kolkata.	Date filtering uses the cinema local date.
+R15	QR privacy	Opaque reference; server validates ownership/role and booking status.	A QR code is not a public route to personal details.
+R16	Release boundary	Demo inventory and provider test payments on a live website.	Prominent demo notice; no claim to sell actual cinema inventory.
+04 / Screen and route map
+Route	Access	Purpose
+/	Visitor	Redirect to /movies; city defaults to Bengaluru.
+/movies?city=bengaluru&date=...&language=...&genre=...&q=...	Visitor	Searchable catalogue; URL is the source for shareable filters.
+/movies/[movieId]	Visitor	Movie details and selected-city/date show options.
+/shows/[showId]/seats	Visitor can view; customer required to hold	Seat availability and local selection.
+/login?returnTo=...	Visitor	Google sign-in with validated internal return path.
+/checkout/[bookingId]	Booking owner	Hold summary, server expiry and test checkout.
+/bookings	Customer	Owned booking history, newest first, paginated.
+/bookings/[bookingId]	Owner or admin	Pending/confirmed/expired/cancelled status; ticket and refund status.
+/tickets/[ticketRef]	Owner or admin	Server-validated ticket details; no gate-scanning feature.
+/admin	Admin	Management overview.
+/admin/movies	Admin	Movie management and images.
+/admin/cinemas	Admin	Cinema, screen and fixed seat-layout management.
+/admin/shows	Admin	Schedule, prices and show cancellation.
+/admin/bookings	Admin	Booking, payment and refund lookup.
+/admin/operations	Admin	Audit entries and failed background work.
+Paths are design targets, not implemented endpoints. Filter state belongs in the URL so refreshing or sharing a link preserves the view. Private booking pages are never shared-cache content. Mutation/API contracts will be specified in P03.
+
+Shared states on every data screen: loading, empty, error, unauthorized where applicable, and retry. A successful HTTP response is not sufficient if the page shows the wrong booking state.
+
+05 / Six core screen wireframes
+Low-fidelity desktop layouts below define information order. They are static diagrams, not working controls. Movie titles and amounts are fictional examples. On mobile, cards stack, filters collapse, and the seat map remains keyboard accessible with labelled controls.
+
+ShowTime
+Bengaluru · Sign in
+W01 · Movie catalogue
+Search movies…
+Date · Language · Genre · Clear filters
+Poster
+Midnight Orbit
+English · Sci-fi
+Poster
+Monsoon Road
+Hindi · Drama
+Poster
+Last Platform
+Kannada · Thriller
+Previous · Page 1 · Next
+Empty: “No shows match these filters.”
+
+ShowTime
+Bengaluru · My bookings
+W02 · Movie details & shows
+Midnight Orbit
+Poster · Synopsis · 140 min · English
+Choose date: Today · Tomorrow · …
+Demo Central Cinema
+Screen 1 · 18:00 · From ₹250
+Demo Lake Cinema
+Screen 2 · 20:30 · From ₹300
+Choose a show → View seats
+Past/cancelled shows cannot be booked.
+
+Midnight Orbit · 18:00
+Screen 1
+W03 · Seat selection
+SCREEN THIS WAY
+A1
+A2
+A3
+A4
+A5
+A6
+B1
+B2
+B3
+B4
+B5
+B6
+White: available · Green: selected
+Amber: held · Grey: booked
+
+A3, A4 · 2 × ₹250 = ₹500
+Reserve seats & continue
+Selection is local until the server accepts the hold. If a seat is taken, preserve other choices and ask for a replacement; no partial hold is created.
+
+ShowTime
+Test checkout
+W04 · Checkout
+Midnight Orbit · Demo Central · Screen 1
+Date/time · Seats A3, A4
+Time remaining: 04:38
+Based on server hold expiry
+2 tickets × ₹250₹500
+Pay ₹500 — test mode
+Expired: show “Hold expired” and a return-to-seats action.
+Processing: show “Verifying payment”; do not display a ticket yet.
+
+ShowTime
+My bookings
+W05 · Booking / ticket
+Confirmed · Reference ST-DEMO
+Midnight Orbit · Date/time
+Cinema · Screen · A3, A4 · ₹500
+[ QR ticket area — placeholder ]
+Email: sent / retrying
+Cancel booking (when eligible)
+Cancelled view: no active ticket.
+Show “Refund processing” separately until verified completed.
+
+ShowTime Admin
+Admin account
+W06 · Admin management
+Movies · Cinemas · Shows · Bookings · Operations
+ShowsCreate show
+Movie · Screen · Start · Status
+Midnight Orbit · S1 · 18:00 · Published
+Editor: movie, screen, date/time, prices
+Inline validation + conflict message
+Cancel show → explain affected bookings
+Explicit confirmation before submission
+All admin mutations are validated and authorized on the server and audit logged.
+
+06 / States and difficult cases
+Entity	Transition	Condition
+Booking	PENDING_PAYMENT → CONFIRMED	Verified captured funds + active hold + published future show; one atomic decision.
+Booking	PENDING_PAYMENT → EXPIRED	Server hold deadline reached; late capture does not revive it.
+Booking	PENDING_PAYMENT or CONFIRMED → CANCELLED	Show cancellation; customer cancellation applies only to eligible confirmed bookings.
+Payment attempt	CREATED → AUTHORIZED → CAPTURED, or FAILED	Provider state; intermediate notifications may be missing/out of order. Reconcile ambiguous status.
+Refund	REQUESTED → PROCESSING → COMPLETED, or FAILED	Provider-verified status; retries must not create duplicate refunds.
+Seat inventory	AVAILABLE → HELD → BOOKED	Selection in the browser is not an inventory state.
+Seat inventory	HELD → AVAILABLE; BOOKED → AVAILABLE	Expiry/release or successful booking cancellation. A cancelled show remains unsellable regardless of seat state.
+Example: normal booking
+At 18:00 you select A3/A4 for a 20:30 show. The backend reserves both until 18:05. You pay ₹500. The server verifies captured funds and confirms the booking while the hold is valid. Email is sent afterward.
+
+Example: late payment
+The hold expires at 18:05. At 18:06 captured funds are observed. The booking remains expired and a refund is queued. Even if those seats still look free, our V1 policy does not revive this booking.
+
+For deterministic V1 behavior, confirmation requires a still-valid hold when the server finalizes the booking. A delayed notification can therefore result in a refund even if the customer paid earlier. Reconciliation reduces this case; recovery must still follow the same policy.
+
+Multiple attempts, callbacks and webhooks may refer to the same purchase. Their delivery count must not determine ticket count. A cancelled booking can legitimately have a CAPTURED payment and a PROCESSING refund.
+
+07 / How the pieces will connect
+Browser: shows pages and collects actions; prices and countdowns are displays.
+Next.js server: authenticates, authorizes, validates inputs, calculates totals and runs booking services.
+PostgreSQL: stores durable truth and coordinates competing reservation requests.
+Razorpay: processes test payments; server callbacks/webhooks/reconciliation verify outcomes.
+Persistent jobs: recover interrupted work and retry email/refund tasks.
+The frontend never connects directly to PostgreSQL or receives provider secrets. Route handlers remain small: they validate and delegate to services. Database transactions protect short operations, not the whole five-minute checkout period.
+
+Terms to learn in this milestone
+Term	Meaning in ShowTime
+Cinema vs screen	A cinema is a location. A screen is one auditorium at that location.
+Show	One movie screening at a particular time in a particular screen.
+Seat vs show seat	A1 is a physical chair; availability of A1 at 18:00 differs from A1 at 21:00.
+Seat hold	A temporary exclusive reservation stored with an expiry and owner.
+Transaction	A short database operation that commits all related changes or rolls them back.
+Idempotency	Repeating a request/event has the same logical effect as handling it once.
+Webhook	Provider-to-server notification that can arrive even after the browser closes.
+Reconciliation	Comparing our stored payment/refund state with the provider and resolving pending outcomes.
+Acceptance criterion	An observable rule used to decide if a feature is finished.
+Security, database constraints and payment behavior will be checked against current official documentation when we implement them. This workbook specifies our product behavior; it is not executable proof of correctness.
+
+08 / Handoff and progress
+Task	Deliverable	Check
+P02.1	Confirm development environment	Check Node/package manager/Git and the actual local workspace before giving OS-specific commands.
+P02.2	Scaffold and pin	Create Next.js App Router + TypeScript; install compatible stable versions and commit a lockfile.
+P02.3	Organize project	App routes, components, server services, validation and tests; move plan/progress into the repo.
+P02.4	Developer checks	Strict type check, lint, formatting, environment validation and production build.
+P02.5	Initial deployment	Connect repository and hosting, deploy application shell; record any account/access blocker honestly.
+P03	Data foundation	Schema, migrations, seed inventory and test database.
+P04	Identity	Google login, sessions, roles and ownership tests.
+P05	Inventory UI	Catalogue, administration and protected uploads.
+P06	Reservation	Seat map, atomic holds and concurrency tests.
+P07–P09	Purchase lifecycle	Payments, durable recovery, tickets, cancellation and refunds.
+P10–P12	Release	Hardening, production operations and portfolio handover.
+P01 review evidence
+User stories: 20, each with an acceptance check and target phase.
+Policy decisions: 16, including exact expiry/cancellation boundaries.
+Access matrix and 15 screen/route targets.
+Six illustrative wireframes, plus required error/empty/pending states.
+Booking/payment/refund state rules and example scenarios.
+Ordered implementation backlog with P02 broken into its first tasks.
+Status: P01 design artifacts prepared and checked against the saved plan. No application code, repository, account connection, payment integration, deployment or automated booking test has been created by this milestone.
+
+Next task: P02.1 — verify the development environment, then initialize the project. P02–P12 remain not started. This workbook records this session's progress; repository tracking begins in P02.
+
+ShowTime · P01 · Requirements and design · Version 1.0
+Reference: ShowTime-Final-Project-Plan.md, 10 October 2026.
