@@ -1,1 +1,4 @@
+# Git repository root is Nextjs, but Husky and lint-staged are configured inside showtime.
+# Navigate to showtime so pre-commit checks use the correct project dependencies and configuration.
+cd showtime
 npx lint-staged
